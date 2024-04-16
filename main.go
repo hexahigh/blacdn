@@ -9,17 +9,13 @@ import (
 
 	"flag"
 	"fmt"
-	"image"
-	"image/gif"
-	"image/jpeg"
-	"image/png"
 	"os"
 
 	"bytes"
+	"os/exec"
 	"sync"
 
 	sniff "github.com/hexahigh/yapc/backend/lib/sniff"
-	"github.com/nfnt/resize"
 )
 
 var (
@@ -59,7 +55,6 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	// Convert to integers
 	width, err := strconv.Atoi(queryParams.Get("w"))
 	if err != nil {
-		logger.Println(err)
 		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("w") == "" {
 			// If the error is due to an empty string, default to 0
 			width = 0
@@ -70,7 +65,6 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	}
 	height, err := strconv.Atoi(queryParams.Get("h"))
 	if err != nil {
-		logger.Println(err)
 		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("h") == "" {
 			// If the error is due to an empty string, default to 0
 			height = 0
@@ -81,7 +75,6 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	}
 	quality, err := strconv.Atoi(queryParams.Get("q"))
 	if err != nil {
-		logger.Println(err)
 		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("q") == "" {
 			// If the error is due to an empty string, default to 100
 			quality = 100
@@ -128,59 +121,48 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var img image.Image
+	var command string
 
-	switch contentType {
-	case "image/jpeg":
-		img, err = jpeg.Decode(bytes.NewReader(bodyBytes))
-		if err != nil {
-			http.Error(w, "Failed to decode JPEG image", http.StatusInternalServerError)
-			return
-		}
-	case "image/png":
-		img, err = png.Decode(bytes.NewReader(bodyBytes))
-		if err != nil {
-			http.Error(w, "Failed to decode PNG image", http.StatusInternalServerError)
-			return
-		}
-	case "image/gif":
-		img, err = gif.Decode(bytes.NewReader(bodyBytes))
-		if err != nil {
-			http.Error(w, "Failed to decode GIF image", http.StatusInternalServerError)
-			return
-		}
-	default:
-		http.Error(w, "Unsupported image format", http.StatusBadRequest)
-		return
+	command = "ffmpeg -i -"
+
+	if params.Quality != 0 {
+		command += " -q:v " + strconv.Itoa(params.Quality)
 	}
 
 	if params.Width != 0 || params.Height != 0 {
-		img = resize.Resize(uint(params.Width), uint(params.Height), img, resize.Bilinear)
+		command = fmt.Sprintf("%s -vf scale=%d:%d", command, params.Width, params.Height)
 	}
 
-	var buf bytes.Buffer
+	// Gradually build the command based on the format
 	switch params.Format {
-	case "jpg":
-		options := &jpeg.Options{Quality: quality}
-		err := jpeg.Encode(&buf, img, options)
-		if err != nil {
-			http.Error(w, "Failed to encode JPEG image", http.StatusInternalServerError)
-			return
-		}
+	case "jpg", "jpeg":
+		command += " -c:v mjpeg -q:v " + strconv.Itoa(params.Quality) + " -f image2pipe -"
 	case "png":
-		err := png.Encode(&buf, img)
-		if err != nil {
-			http.Error(w, "Failed to encode PNG image", http.StatusInternalServerError)
-			return
-		}
+		command += " -c:v png -f image2pipe -"
 	case "gif":
-		err := gif.Encode(&buf, img, nil)
-		if err != nil {
-			http.Error(w, "Failed to encode GIF image", http.StatusInternalServerError)
-			return
-		}
+		command += " -f gif -"
+	case "webp":
+		command += " -f webp -"
 	default:
 		http.Error(w, "Unsupported new format", http.StatusBadRequest)
+		return
+	}
+
+	// Execute the command
+	logger.Println("Running command:", command)
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Stdin = bytes.NewReader(bodyBytes)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+
+	// Capture stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		http.Error(w, "Failed to convert image", http.StatusInternalServerError)
+		logger.Println("Command execution failed:", err)
+		logger.Println("ffmpeg error output:", stderr.String())
 		return
 	}
 
@@ -188,7 +170,6 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	cache.Set(cacheKey, buf.Bytes())
 
 	// Serve the processed image
-	w.Header().Set("Content-Type", contentType)
 	w.Write(buf.Bytes())
 }
 
