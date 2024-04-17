@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -228,7 +229,7 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 
 	var command string
 
-	command = "ffmpeg -i -"
+	command = "ffmpeg -loglevel warning -i -"
 
 	if params.Quality != 0 {
 		command += " -q:v " + strconv.Itoa(params.Quality)
@@ -248,6 +249,10 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 		command += " -f gif -"
 	case "webp":
 		command += " -f webp -"
+	case "avif":
+		// Avif does not support outputting to a pipe so we need to do this unholy mess
+		tmpFile := os.TempDir() + "/" + strconv.Itoa(rand.Int())
+		command += fmt.Sprintf(" -f avif %s && cat %s && rm %s", tmpFile, tmpFile, tmpFile)
 	default:
 		http.Error(w, "Unsupported new format", http.StatusBadRequest)
 		return
@@ -350,9 +355,7 @@ func (c *Cache) Stats() (int, int64) {
 	var count int
 	var totalSize int64
 	if c.Type == "sql" {
-		// TODO: Implement
-		count = 0
-		totalSize = 0
+		c.db.QueryRow("SELECT COUNT(*), SUM(LENGTH(value)) FROM cache").Scan(&count, &totalSize)
 	} else {
 
 		c.mu.RLock()
