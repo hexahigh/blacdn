@@ -217,7 +217,7 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate a unique cache key
-	cacheKey := fmt.Sprintf("%s-%d-%d-%s", params.Url, params.Width, params.Height, params.Format)
+	cacheKey := fmt.Sprintf("%s-%d-%d-%s-%d", params.Url, params.Width, params.Height, params.Format, params.Quality)
 
 	// Check if the image is in the cache
 	if cachedImg, ok := cache.Get(cacheKey); ok {
