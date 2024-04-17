@@ -1,19 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"strconv"
-
-	"flag"
-	"fmt"
 	"os"
-
-	"bytes"
 	"os/exec"
+	"strconv"
 	"sync"
+	"time"
 
 	sniff "github.com/hexahigh/yapc/backend/lib/sniff"
 )
@@ -30,8 +29,28 @@ func init() {
 }
 
 func main() {
-	http.HandleFunc("/img", handleImg)
-	http.ListenAndServe(*port, nil)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		http.HandleFunc("/img", handleImg)
+		http.ListenAndServe(*port, nil)
+	}()
+
+	go func() {
+		// Print cache stats every 10 seconds
+		for {
+			count, size := cache.Stats()
+			logger.Printf("Cache stats: %d images, %s", count, humanBytes(size))
+			time.Sleep(10 * time.Second)
+		}
+
+	}()
+
+	wg.Wait()
+
 }
 
 func handleImg(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +95,8 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	quality, err := strconv.Atoi(queryParams.Get("q"))
 	if err != nil {
 		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("q") == "" {
-			// If the error is due to an empty string, default to 100
-			quality = 100
+			// If the error is due to an empty string, default to 0
+			quality = 0
 		} else {
 			http.Error(w, "Invalid quality parameter", http.StatusBadRequest)
 			return
@@ -133,7 +152,7 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	// Gradually build the command based on the format
 	switch params.Format {
 	case "jpg", "jpeg":
-		command += " -c:v mjpeg -q:v " + strconv.Itoa(params.Quality) + " -f image2pipe -"
+		command += " -c:v mjpeg -f image2pipe -"
 	case "png":
 		command += " -c:v png -f image2pipe -"
 	case "gif":
@@ -198,4 +217,31 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 	defer c.mu.RUnlock()
 	val, ok := c.m[key]
 	return val, ok
+}
+
+func (c *Cache) Stats() (int, int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var count int
+	var totalSize int64
+	for _, value := range c.m {
+		count++
+		totalSize += int64(len(value))
+	}
+
+	return count, totalSize
+}
+
+func humanBytes(b int64) string {
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "kMGTPE"[exp])
 }
