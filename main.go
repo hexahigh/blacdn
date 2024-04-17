@@ -14,8 +14,6 @@ import (
 	"bytes"
 	"os/exec"
 	"sync"
-
-	sniff "github.com/hexahigh/yapc/backend/lib/sniff"
 )
 
 var (
@@ -107,16 +105,12 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get content type
-	contentType := sniff.DetectContentType(bodyBytes)
-
 	// Generate a unique cache key
 	cacheKey := fmt.Sprintf("%s-%d-%d-%s", params.Url, params.Width, params.Height, params.Format)
 
 	// Check if the image is in the cache
 	if cachedImg, ok := cache.Get(cacheKey); ok {
 		// Serve the cached image
-		w.Header().Set("Content-Type", contentType)
 		w.Write(cachedImg)
 		return
 	}
