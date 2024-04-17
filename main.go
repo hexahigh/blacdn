@@ -18,7 +18,8 @@ import (
 )
 
 var (
-	port = flag.String("p", ":8080", "port to listen on")
+	port         = flag.String("p", ":8080", "port to listen on")
+	cacheMaxSize = flag.Int("cm", 8000, "maximum size of the cache in MB")
 )
 
 var logger *log.Logger
@@ -37,6 +38,18 @@ func main() {
 		defer wg.Done()
 		http.HandleFunc("/img", handleImg)
 		http.ListenAndServe(*port, nil)
+	}()
+
+	go func() {
+		// Delete the oldest item from the cache if it exceeds the max size
+		for {
+			_, size := cache.Stats()
+			if size >= int64(*cacheMaxSize)*1024*1024 {
+				logger.Println("Cache exceeds max size, deleting oldest item")
+				cache.DeleteOldest()
+			}
+			time.Sleep(1 * time.Second)
+		}
 	}()
 
 	go func() {
@@ -195,28 +208,55 @@ func corsShit(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 }
 
-// Define a cache structure
+// Cache structure with a map for quick access and a slice for order tracking
 type Cache struct {
-	mu sync.RWMutex
-	m  map[string][]byte
+	mu    sync.RWMutex
+	m     map[string][]byte
+	order []string // Slice to keep track of the order of insertion
 }
 
 // Initialize the cache
 var cache = Cache{
-	m: make(map[string][]byte),
+	m:     make(map[string][]byte),
+	order: make([]string, 0),
 }
 
+// Set method to add an item to the cache
 func (c *Cache) Set(key string, value []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.m[key] = value
+	c.order = append(c.order, key) // Add the key to the order slice
 }
 
+// Get method to retrieve an item from the cache
 func (c *Cache) Get(key string) ([]byte, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	val, ok := c.m[key]
+	if ok {
+		// Move the key to the end of the order slice to mark it as recently used
+		for i, k := range c.order {
+			if k == key {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		c.order = append(c.order, key)
+	}
 	return val, ok
+}
+
+// DeleteOldest method to remove the oldest item from the cache
+func (c *Cache) DeleteOldest() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.order) == 0 {
+		return // No items to delete
+	}
+	oldestKey := c.order[0] // The first item in the order slice is the oldest
+	delete(c.m, oldestKey)  // Remove the item from the map
+	c.order = c.order[1:]   // Remove the oldest key from the order slice
 }
 
 func (c *Cache) Stats() (int, int64) {
