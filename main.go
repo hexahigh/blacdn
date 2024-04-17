@@ -14,6 +14,8 @@ import (
 	"bytes"
 	"os/exec"
 	"sync"
+
+	sniff "github.com/hexahigh/yapc/backend/lib/sniff"
 )
 
 var (
@@ -111,6 +113,7 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	// Check if the image is in the cache
 	if cachedImg, ok := cache.Get(cacheKey); ok {
 		// Serve the cached image
+		w.Header().Set("Content-Type", sniff.DetectContentType(cachedImg))
 		w.Write(cachedImg)
 		return
 	}
@@ -164,6 +167,7 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	cache.Set(cacheKey, buf.Bytes())
 
 	// Serve the processed image
+	w.Header().Set("Content-Type", sniff.DetectContentType(buf.Bytes()))
 	w.Write(buf.Bytes())
 }
 
