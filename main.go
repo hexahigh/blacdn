@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"flag"
 	"fmt"
 	"io"
@@ -14,19 +15,94 @@ import (
 	"sync"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/mattn/go-sqlite3"
+
 	sniff "github.com/hexahigh/yapc/backend/lib/sniff"
 )
 
 var (
 	port         = flag.String("p", ":8080", "port to listen on")
 	cacheMaxSize = flag.Int("cm", 8000, "maximum size of the cache in MB")
+	cacheType    = flag.String("cache", "in-memory", "Cache type: in-memory or sql")
+	dbType       = flag.String("db:type", "sqlite", "SQL database type: sqlite or mysql")
+	dbPass       = flag.String("db:pass", "", "Database password (Unused for sqlite)")
+	dbUser       = flag.String("db:user", "root", "Database user (Unused for sqlite)")
+	dbHost       = flag.String("db:host", "localhost:3306", "Database host (Unused for sqlite)")
+	dbDb         = flag.String("db:db", "yapc", "Database name (Unused for sqlite)")
+	dbFile       = flag.String("db:file", "./cache.db", "SQLite database file")
+	dbConns      = flag.Int("db:conns", 10, "Maximum number of database connections")
+	waitForIt    = flag.Bool("db:wait", false, "Wait for database connection")
 )
 
+type Cache struct {
+	mu    sync.RWMutex
+	m     map[string][]byte
+	order []string // Slice to keep track of the order of insertion
+	db    *sql.DB  // SQLite database connection
+	Type  string   // Cache type: in-memory or sqlite
+}
+
 var logger *log.Logger
+var cache Cache
+var db *sql.DB
 
 func init() {
 	flag.Parse()
 	logger = log.New(os.Stdout, "", log.LstdFlags)
+
+	if *cacheType == "sql" {
+		switch *dbType {
+		case "sqlite":
+			var err error
+			db, err = sql.Open("sqlite3", *dbFile)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case "mysql":
+			var err error
+			if *waitForIt {
+				for {
+					db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", *dbUser, *dbPass, *dbHost, *dbDb))
+					if err != nil {
+						log.Printf("Failed to connect to database: %v", err)
+						time.Sleep(time.Second * 5)
+						continue
+					}
+					break
+				}
+			} else {
+				db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", *dbUser, *dbPass, *dbHost, *dbDb))
+				if err != nil {
+					log.Printf("Failed to connect to database: %v", err)
+					os.Exit(1)
+				}
+			}
+			db.SetConnMaxLifetime(time.Minute * 3)
+			db.SetConnMaxIdleTime(time.Minute * 2)
+			db.SetMaxOpenConns(*dbConns)
+			db.SetMaxIdleConns(*dbConns)
+		}
+
+		cache = Cache{
+			Type: "sql",
+			db:   db,
+		}
+		// Initialize the SQLite table if it doesn't exist
+		_, err := db.Exec(`CREATE TABLE IF NOT EXISTS cache (
+			key TEXT PRIMARY KEY,
+			value BLOB
+		)`)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		cache = Cache{
+			m:     make(map[string][]byte),
+			order: make([]string, 0),
+			Type:  "in-memory",
+		}
+	}
 }
 
 func main() {
@@ -208,66 +284,84 @@ func corsShit(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 }
 
-// Cache structure with a map for quick access and a slice for order tracking
-type Cache struct {
-	mu    sync.RWMutex
-	m     map[string][]byte
-	order []string // Slice to keep track of the order of insertion
-}
-
-// Initialize the cache
-var cache = Cache{
-	m:     make(map[string][]byte),
-	order: make([]string, 0),
-}
-
-// Set method to add an item to the cache
+// Set method for SQLite cache
 func (c *Cache) Set(key string, value []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.m[key] = value
-	c.order = append(c.order, key) // Add the key to the order slice
-}
-
-// Get method to retrieve an item from the cache
-func (c *Cache) Get(key string) ([]byte, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	val, ok := c.m[key]
-	if ok {
-		// Move the key to the end of the order slice to mark it as recently used
-		for i, k := range c.order {
-			if k == key {
-				c.order = append(c.order[:i], c.order[i+1:]...)
-				break
-			}
+	if c.Type == "sql" {
+		_, err := c.db.Exec("INSERT OR REPLACE INTO cache (key, value) VALUES (?, ?)", key, value)
+		if err != nil {
+			log.Println("Failed to set cache:", err)
 		}
-		c.order = append(c.order, key)
+	} else {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.m[key] = value
+		c.order = append(c.order, key) // Add the key to the order slice
 	}
-	return val, ok
 }
 
-// DeleteOldest method to remove the oldest item from the cache
-func (c *Cache) DeleteOldest() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.order) == 0 {
-		return // No items to delete
+// Get method for SQLite cache
+func (c *Cache) Get(key string) ([]byte, bool) {
+	if c.Type == "sql" {
+		var value []byte
+		err := c.db.QueryRow("SELECT value FROM cache WHERE key = ?", key).Scan(&value)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, false // Key not found
+			}
+			log.Println("Failed to get cache:", err)
+			return nil, false
+		}
+		return value, true
+	} else {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		val, ok := c.m[key]
+		if ok {
+			// Move the key to the end of the order slice to mark it as recently used
+			for i, k := range c.order {
+				if k == key {
+					c.order = append(c.order[:i], c.order[i+1:]...)
+					break
+				}
+			}
+			c.order = append(c.order, key)
+		}
+		return val, ok
 	}
-	oldestKey := c.order[0] // The first item in the order slice is the oldest
-	delete(c.m, oldestKey)  // Remove the item from the map
-	c.order = c.order[1:]   // Remove the oldest key from the order slice
+}
+
+// DeleteOldest method for SQLite cache
+func (c *Cache) DeleteOldest() {
+	if c.Type == "sql" {
+		// TODO: Implement
+	} else {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if len(c.order) == 0 {
+			return // No items to delete
+		}
+		oldestKey := c.order[0] // The first item in the order slice is the oldest
+		delete(c.m, oldestKey)  // Remove the item from the map
+		c.order = c.order[1:]   // Remove the oldest key from the order slice
+	}
 }
 
 func (c *Cache) Stats() (int, int64) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	var count int
 	var totalSize int64
-	for _, value := range c.m {
-		count++
-		totalSize += int64(len(value))
+	if c.Type == "sql" {
+		// TODO: Implement
+		count = 0
+		totalSize = 0
+	} else {
+
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+
+		for _, value := range c.m {
+			count++
+			totalSize += int64(len(value))
+		}
 	}
 
 	return count, totalSize
