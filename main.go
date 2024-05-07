@@ -1,21 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/davidbyttow/govips/v2/vips"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 
@@ -34,6 +32,7 @@ var (
 	dbFile       = flag.String("db:file", "./cache.db", "SQLite database file")
 	dbConns      = flag.Int("db:conns", 10, "Maximum number of database connections")
 	waitForIt    = flag.Bool("db:wait", false, "Wait for database connection")
+	verbosity    = flag.Int("v", 0, "Verbosity level [0-3]")
 )
 
 type Cache struct {
@@ -107,11 +106,14 @@ func init() {
 }
 
 func main() {
-
 	var wg sync.WaitGroup
 	wg.Add(1)
 
+	vips.PrintObjectReport("vips")
+
 	go func() {
+		vips.Startup(nil)
+		defer vips.Shutdown()
 		defer wg.Done()
 		http.HandleFunc("/img", handleImg)
 		http.ListenAndServe(*port, nil)
@@ -154,51 +156,45 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type Params struct {
-		Url     string
-		Format  string
-		Width   int
-		Height  int
-		Quality int
+		Url         string
+		Format      string
+		Width       float64
+		Height      float64
+		Quality     int64
+		Strip       bool
+		Lossless    bool
+		Compression int64
 	}
 
 	// Convert to integers
-	width, err := strconv.Atoi(queryParams.Get("w"))
-	if err != nil {
-		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("w") == "" {
-			// If the error is due to an empty string, default to 0
-			width = 0
-		} else {
-			http.Error(w, "Invalid width parameter", http.StatusBadRequest)
-			return
-		}
+	width, ok := stringToFloat64(queryParams.Get("w"), 1, w)
+	if !ok {
+		return
 	}
-	height, err := strconv.Atoi(queryParams.Get("h"))
-	if err != nil {
-		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("h") == "" {
-			// If the error is due to an empty string, default to 0
-			height = 0
-		} else {
-			http.Error(w, "Invalid height parameter", http.StatusBadRequest)
-			return
-		}
+	height, ok := stringToFloat64(queryParams.Get("h"), 1, w)
+	if !ok {
+		return
 	}
-	quality, err := strconv.Atoi(queryParams.Get("q"))
-	if err != nil {
-		if err.(*strconv.NumError).Err == strconv.ErrSyntax && queryParams.Get("q") == "" {
-			// If the error is due to an empty string, default to 0
-			quality = 0
-		} else {
-			http.Error(w, "Invalid quality parameter", http.StatusBadRequest)
-			return
-		}
+	quality, ok := stringToInt64(queryParams.Get("q"), -1, w)
+	if !ok {
+		return
+	}
+	compressionlevel, ok := stringToInt64(queryParams.Get("c"), -1, w)
+	if !ok {
+		return
 	}
 
 	var params Params
 	params.Url = queryParams.Get("u")
 	params.Format = queryParams.Get("f")
+	params.Strip = queryParams.Get("s") == "1"
+	params.Lossless = queryParams.Get("l") == "1"
 	params.Width = width
 	params.Height = height
 	params.Quality = quality
+	params.Compression = compressionlevel
+
+	Vprintln(3, "Parameters: ", params)
 
 	// Fetch the original image
 	resp, err := http.Get(params.Url)
@@ -217,7 +213,7 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate a unique cache key
-	cacheKey := fmt.Sprintf("%s-%d-%d-%s-%d", params.Url, params.Width, params.Height, params.Format, params.Quality)
+	cacheKey := fmt.Sprintf("%s-%s-%d-%d-%d-%t-%d", params.Url, params.Format, params.Width, params.Height, params.Quality, params.Strip, params.Compression, params.Lossless)
 
 	// Check if the image is in the cache
 	if cachedImg, ok := cache.Get(cacheKey); ok {
@@ -227,61 +223,116 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var command string
-
-	command = "ffmpeg -loglevel warning -i -"
-
-	if params.Quality != 0 {
-		command += " -q:v " + strconv.Itoa(params.Quality)
+	Vprintln(2, "Loading image")
+	image, err := vips.NewImageFromBuffer(bodyBytes)
+	if err != nil {
+		http.Error(w, "Failed to load image", http.StatusInternalServerError)
+		logger.Println(err)
+		return
 	}
+	defer image.Close()
+
+	kernel := vips.KernelAuto
 
 	if params.Width != 0 || params.Height != 0 {
-		command = fmt.Sprintf("%s -vf scale=%d:%d", command, params.Width, params.Height)
+		Vprintln(2, "Resizing image")
+		image.ResizeWithVScale(float64(params.Width), float64(params.Height), kernel)
 	}
+
+	var buf []byte
 
 	// Gradually build the command based on the format
 	switch params.Format {
 	case "jpg", "jpeg":
-		command += " -c:v mjpeg -f image2pipe -"
+		Vprintln(2, "Output image is JPEG")
+		jpegParams := vips.JpegExportParams{
+			Quality:       int(params.Quality),
+			StripMetadata: params.Strip,
+		}
+		buf, _, err = image.ExportJpeg(&jpegParams)
+		if err != nil {
+			http.Error(w, "Failed to export image", http.StatusInternalServerError)
+			logger.Println(err)
+			return
+		}
 	case "png":
-		command += " -c:v png -f image2pipe -"
-	case "gif":
-		command += " -f gif -"
+		Vprintln(2, "Output image is PNG")
+		pngParams := vips.PngExportParams{
+			Quality:       int(params.Quality),
+			StripMetadata: params.Strip,
+			Compression:   int(params.Compression),
+		}
+		buf, _, err = image.ExportPng(&pngParams)
+		if err != nil {
+			http.Error(w, "Failed to export image", http.StatusInternalServerError)
+			logger.Println(err)
+			return
+		}
 	case "webp":
-		command += " -f webp -"
+		Vprintln(2, "Output image is WEBP")
+		webpParams := vips.NewWebpExportParams()
+		if quality != -1 {
+			webpParams.Quality = int(params.Quality)
+		}
+		webpParams.StripMetadata = params.Strip
+		webpParams.Lossless = params.Lossless
+		if params.Compression != -1 {
+			webpParams.ReductionEffort = int(params.Compression)
+		}
+
+		buf, _, err = image.ExportWebp(webpParams)
+		if err != nil {
+			http.Error(w, "Failed to export image", http.StatusInternalServerError)
+			logger.Println(err)
+			return
+		}
 	case "avif":
-		// Avif does not support outputting to a pipe so we need to do this unholy mess
-		tmpFile := os.TempDir() + "/" + strconv.Itoa(rand.Int())
-		command += fmt.Sprintf(" -f avif %s && cat %s && rm %s", tmpFile, tmpFile, tmpFile)
+		Vprintln(2, "Output image is AVIF")
+		avifParams := vips.NewAvifExportParams()
+		avifParams.StripMetadata = params.Strip
+		avifParams.Lossless = params.Lossless
+		if params.Compression != -1 {
+			avifParams.Effort = int(params.Compression)
+		}
+		if params.Quality != -1 {
+			avifParams.Quality = int(params.Quality)
+		}
+
+		buf, _, err = image.ExportAvif(avifParams)
+		if err != nil {
+			http.Error(w, "Failed to export image", http.StatusInternalServerError)
+			logger.Println(err)
+			return
+		}
+	case "jxl":
+		Vprintln(2, "Output image is JXL")
+		jxlParams := vips.NewJxlExportParams()
+		jxlParams.Lossless = params.Lossless
+		if params.Compression != -1 {
+			jxlParams.Effort = int(params.Compression)
+		}
+		if params.Quality != -1 {
+			jxlParams.Quality = int(params.Quality)
+		}
+		buf, _, err = image.ExportJxl(jxlParams)
+		if err != nil {
+			http.Error(w, "Failed to export image", http.StatusInternalServerError)
+			logger.Println(err)
+			return
+		}
 	default:
 		http.Error(w, "Unsupported new format", http.StatusBadRequest)
 		return
 	}
 
-	// Execute the command
-	logger.Println("Running command:", command)
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Stdin = bytes.NewReader(bodyBytes)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-
-	// Capture stderr
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		http.Error(w, "Failed to convert image", http.StatusInternalServerError)
-		logger.Println("Command execution failed:", err)
-		logger.Println("ffmpeg error output:", stderr.String())
-		return
-	}
-
 	// Store the processed image in the cache
-	cache.Set(cacheKey, buf.Bytes())
+	Vprintln(2, "Storing processed image in cache")
+	cache.Set(cacheKey, buf)
 
 	// Serve the processed image
-	w.Header().Set("Content-Type", sniff.DetectContentType(buf.Bytes()))
-	w.Write(buf.Bytes())
+	Vprintln(2, "Serving processed image")
+	w.Header().Set("Content-Type", sniff.DetectContentType(buf))
+	w.Write(buf)
 }
 
 func corsShit(w http.ResponseWriter) {
@@ -381,4 +432,38 @@ func humanBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "kMGTPE"[exp])
+}
+
+func stringToInt64(s string, def int64, w http.ResponseWriter) (int64, bool) {
+	if s == "" {
+		return def, true
+	}
+	value, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		if err.(*strconv.NumError).Err == strconv.ErrSyntax {
+			http.Error(w, "Invalid parameter", http.StatusBadRequest)
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+func stringToFloat64(s string, def float64, w http.ResponseWriter) (float64, bool) {
+	if s == "" {
+		return def, true
+	}
+	value, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		if err.(*strconv.NumError).Err == strconv.ErrSyntax {
+			http.Error(w, "Invalid parameter", http.StatusBadRequest)
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+func Vprintln(l int, s ...any) {
+	if l <= *verbosity {
+		logger.Println(s)
+	}
 }
