@@ -21,18 +21,19 @@ import (
 )
 
 var (
-	port         = flag.String("p", ":8080", "port to listen on")
-	cacheMaxSize = flag.Int("cm", 8000, "maximum size of the cache in MB")
-	cacheType    = flag.String("cache", "in-memory", "Cache type: in-memory or sql")
-	dbType       = flag.String("db:type", "sqlite", "SQL database type: sqlite or mysql")
-	dbPass       = flag.String("db:pass", "", "Database password (Unused for sqlite)")
-	dbUser       = flag.String("db:user", "root", "Database user (Unused for sqlite)")
-	dbHost       = flag.String("db:host", "localhost:3306", "Database host (Unused for sqlite)")
-	dbDb         = flag.String("db:db", "yapc", "Database name (Unused for sqlite)")
-	dbFile       = flag.String("db:file", "./cache.db", "SQLite database file")
-	dbConns      = flag.Int("db:conns", 10, "Maximum number of database connections")
-	waitForIt    = flag.Bool("db:wait", false, "Wait for database connection")
-	verbosity    = flag.Int("v", 0, "Verbosity level [0-3]")
+	port             = flag.String("p", ":8080", "port to listen on")
+	cacheMaxSize     = flag.Int("cm", 8000, "maximum size of the cache in MB")
+	cacheItemMaxSize = flag.Int("cim", 2000, "maximum size of a single item in MB")
+	cacheType        = flag.String("cache", "in-memory", "Cache type: in-memory or sql")
+	dbType           = flag.String("db:type", "sqlite", "SQL database type: sqlite or mysql")
+	dbPass           = flag.String("db:pass", "", "Database password (Unused for sqlite)")
+	dbUser           = flag.String("db:user", "root", "Database user (Unused for sqlite)")
+	dbHost           = flag.String("db:host", "localhost:3306", "Database host (Unused for sqlite)")
+	dbDb             = flag.String("db:db", "yapc", "Database name (Unused for sqlite)")
+	dbFile           = flag.String("db:file", "./cache.db", "SQLite database file")
+	dbConns          = flag.Int("db:conns", 10, "Maximum number of database connections")
+	waitForIt        = flag.Bool("db:wait", false, "Wait for database connection")
+	verbosity        = flag.Int("v", 0, "Verbosity level [0-3]")
 )
 
 var buildFeatures []string
@@ -345,10 +346,15 @@ func corsShit(w http.ResponseWriter) {
 
 // Set method for SQLite cache
 func (c *Cache) Set(key string, value []byte) {
+	Vprintln(2, "Setting cache for", key)
+	if len(value) > *cacheItemMaxSize*1024*1024 {
+		logger.Println("Cache item too large:", len(value)/1024/1024, "MB")
+		return
+	}
 	if c.Type == "sql" {
 		_, err := c.db.Exec("INSERT OR REPLACE INTO cache (key, value) VALUES (?, ?)", key, value)
 		if err != nil {
-			log.Println("Failed to set cache:", err)
+			logger.Println("Failed to set cache:", err)
 		}
 	} else {
 		c.mu.Lock()
