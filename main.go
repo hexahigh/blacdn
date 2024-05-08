@@ -17,7 +17,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 
-	sniff "github.com/hexahigh/yapc/backend/lib/sniff"
+	sniff "github.com/hexahigh/go-lib/sniff"
 )
 
 var (
@@ -34,6 +34,8 @@ var (
 	waitForIt    = flag.Bool("db:wait", false, "Wait for database connection")
 	verbosity    = flag.Int("v", 0, "Verbosity level [0-3]")
 )
+
+var buildFeatures []string
 
 type Cache struct {
 	mu    sync.RWMutex
@@ -110,6 +112,7 @@ func main() {
 	wg.Add(1)
 
 	vips.PrintObjectReport("vips")
+	logger.Println("Build features:", buildFeatures)
 
 	go func() {
 		vips.Startup(nil)
@@ -196,6 +199,17 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 
 	Vprintln(3, "Parameters: ", params)
 
+	// Generate a unique cache key
+	cacheKey := fmt.Sprintf("%s-%s-%d-%d-%d-%t-%d", params.Url, params.Format, params.Width, params.Height, params.Quality, params.Strip, params.Compression, params.Lossless)
+
+	// Check if the image is in the cache
+	if cachedImg, ok := cache.Get(cacheKey); ok {
+		// Serve the cached image
+		w.Header().Set("Content-Type", sniff.DetectContentType(cachedImg))
+		w.Write(cachedImg)
+		return
+	}
+
 	// Fetch the original image
 	resp, err := http.Get(params.Url)
 	if err != nil {
@@ -209,17 +223,6 @@ func handleImg(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
-		return
-	}
-
-	// Generate a unique cache key
-	cacheKey := fmt.Sprintf("%s-%s-%d-%d-%d-%t-%d", params.Url, params.Format, params.Width, params.Height, params.Quality, params.Strip, params.Compression, params.Lossless)
-
-	// Check if the image is in the cache
-	if cachedImg, ok := cache.Get(cacheKey); ok {
-		// Serve the cached image
-		w.Header().Set("Content-Type", sniff.DetectContentType(cachedImg))
-		w.Write(cachedImg)
 		return
 	}
 
@@ -466,4 +469,13 @@ func Vprintln(l int, s ...any) {
 	if l <= *verbosity {
 		logger.Println(s)
 	}
+}
+
+func contains(slice []string, item string) bool {
+	for _, a := range slice {
+		if a == item {
+			return true
+		}
+	}
+	return false
 }

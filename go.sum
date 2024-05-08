@@ -19,6 +19,8 @@ github.com/gogo/protobuf v1.3.1/go.mod h1:SlYgWuQ5SjCEi6WLHjHCa1yvBfUnHcTbrrZtXP
 github.com/google/gofuzz v1.0.0/go.mod h1:dBl0BpW6vV/+mYPU4Po3pmUjxk6FQPldtuIdl/M65Eg=
 github.com/google/uuid v1.1.1/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/hashicorp/golang-lru v0.5.4/go.mod h1:iADmTwqILo4mZ8BN3D2Q6+9jd8WM5uGBxy+E8yxSoD4=
+github.com/hexahigh/go-lib v0.0.0-20240507124118-2b4d74ef5727 h1:4wQ0T3UyIRDBbdpNdBgvUddthPFT9AamjYsK89C4LpA=
+github.com/hexahigh/go-lib v0.0.0-20240507124118-2b4d74ef5727/go.mod h1:obXI9UpXHb8zk6wAFuZSxdpqtFjjxK7HNOF0AUPAudw=
 github.com/hexahigh/yapc v2.3.0+incompatible h1:X2mX8YbyCLTnUeJRMK8MkSWpcLeXuKxCmfvsM/BPWqE=
 github.com/hexahigh/yapc v2.3.0+incompatible/go.mod h1:3/FX/NZI7KoW5Cr2wP2v1kJt7OujT7dd9uPXVORoUys=
 github.com/hexahigh/yapc/backend v0.0.0-20240412083936-852e1301971d h1:vikfHBZq1YTww4mSQjSi/3rloISrPaEEmdzrOCDSSr0=

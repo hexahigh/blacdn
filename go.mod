@@ -1,6 +1,8 @@
 module github.com/hexahigh/blacdn
 
-go 1.22.0
+go 1.22.1
+
+toolchain go1.22.2
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -8,6 +10,7 @@ require (
 	github.com/davidbyttow/govips/v2 v2.14.0 // indirect
 	github.com/disintegration/imaging v1.6.2 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
+	github.com/hexahigh/go-lib v0.0.0-20240507124118-2b4d74ef5727 // indirect
 	github.com/hexahigh/yapc v2.3.0+incompatible // indirect
 	github.com/hexahigh/yapc/backend v0.0.0-20240412083936-852e1301971d // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
